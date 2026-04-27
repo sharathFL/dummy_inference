@@ -1,0 +1,13 @@
+services:
+  random_bits:
+    build: .
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=0
+    restart: unless-stopped
+    command:
+      - python3
+      - random_bits_node.py
+      - --ros-args
+      - -p
+      - api_url:=http://api-server:8080/predict
