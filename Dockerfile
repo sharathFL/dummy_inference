@@ -6,7 +6,7 @@ WORKDIR /app
 
 RUN pip3 install requests
 
-COPY random_bits_node.py .
+COPY inference_dummy_node.py .
 
 ENTRYPOINT ["/ros_entrypoint.sh"]
 CMD ["python3", "random_bits_node.py"]
