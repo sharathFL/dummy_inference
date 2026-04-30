@@ -83,7 +83,7 @@ class RealtimeInferenceHeartbeatNode(Node):
             self.config["DEFAULT"]["clip_duration"].strip()
         )
 
-        self.threshold = 0.5
+        self.threshold = 0.2
         self.score_window_size = 10
 
         x = self.topic.split("/")
