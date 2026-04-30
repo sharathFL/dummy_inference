@@ -19,21 +19,14 @@ from std_msgs.msg import String
 from audio_interfaces.msg import Signals
 
 
-# Configure sys.path for imports
 sys.path.append(os.path.abspath(os.path.join(os.getcwd(), "src")))
-
 from config.log_config import get_logger
 
 
-# Logger
 logger = get_logger(__name__)
 
-
-# API endpoint
 API_URL = "https://1c41-106-51-87-203.ngrok-free.app/api/heartbeat"
 
-
-# Load config
 config = configparser.ConfigParser()
 config.read("src/data_collection/data_collection/data_collector_node.ini")
 
@@ -47,6 +40,7 @@ async def get_topics_list():
 
     try:
         while not topics_found:
+            print("[DISCOVERY] Searching for /telescopii topics...")
             logger.info("Searching for /telescopii topics...")
 
             topics = node_dummy.get_topic_names_and_types()
@@ -54,17 +48,20 @@ async def get_topics_list():
 
             for topic_name, topic_types in topics:
                 if "/telescopii" in topic_name:
+                    print(f"[DISCOVERY] Found topic: {topic_name}")
                     logger.info(f"Topic found: {topic_name}")
                     topic_list.append(topic_name)
                     topics_found = True
 
-        node_dummy.destroy_node()
         return list(set(topic_list))
 
     except Exception as e:
+        print(f"[DISCOVERY ERROR] {e}")
         logger.error(f"Unable to get topics list: {e}")
-        node_dummy.destroy_node()
         return []
+
+    finally:
+        node_dummy.destroy_node()
 
 
 class RealtimeInferenceHeartbeatNode(Node):
@@ -80,15 +77,13 @@ class RealtimeInferenceHeartbeatNode(Node):
         self.latest_prediction = None
 
         self.score_buffer = []
+        self.last_stream_print_time = 0
 
         self.clip_duration = int(
             self.config["DEFAULT"]["clip_duration"].strip()
         )
 
-        # Threshold for anomaly detection
         self.threshold = 0.5
-
-        # Number of past scores to keep for cumulative / sliding average
         self.score_window_size = 10
 
         x = self.topic.split("/")
@@ -117,19 +112,35 @@ class RealtimeInferenceHeartbeatNode(Node):
             self.send_heartbeat
         )
 
+        print(
+            f"[SUBSCRIBED] {self.topic} -> "
+            f"Machine: {self.machine_name}, "
+            f"Sensor Type: {self.sensor_type}, "
+            f"Sensor: {self.sensor_name}"
+        )
+
         logger.info(f"Subscribed to topic: {self.topic}")
 
     def listener_callback(self, msg):
         self.frames.extend(msg.signals_vect)
 
-        laptime = round(time.time() - self.starttime, 2)
+        current_time = time.time()
+        laptime = round(current_time - self.starttime, 2)
 
-        print(
-            f"Received data from topic {self.topic}, "
-            f"elapsed time: {laptime} sec"
-        )
+        if current_time - self.last_stream_print_time > 1:
+            print(
+                f"[STREAMING] {self.topic} | "
+                f"buffer={len(self.frames)} samples | "
+                f"elapsed={laptime}s"
+            )
+            self.last_stream_print_time = current_time
 
         if laptime >= self.clip_duration:
+            print(
+                f"\n[CLIP READY] {self.topic} | "
+                f"{len(self.frames)} samples collected"
+            )
+
             logger.info(
                 f"Collected {self.clip_duration} sec data from topic {self.topic}"
             )
@@ -143,7 +154,6 @@ class RealtimeInferenceHeartbeatNode(Node):
             )
 
             self.latest_prediction = prediction_result
-
             self.publish_prediction(prediction_result)
 
             self.starttime = time.time()
@@ -151,24 +161,15 @@ class RealtimeInferenceHeartbeatNode(Node):
 
     def run_prediction(self, signal_data, sampling_rate):
         """
-        Simple threshold-based prediction logic.
+        Threshold-based prediction logic.
 
-        Current logic:
-        1. Convert signal to numpy array
-        2. Calculate RMS energy
-        3. Calculate variance
-        4. Combine RMS + variance into one anomaly score
-        5. Keep cumulative sliding average
-        6. Compare against threshold
-        7. Return anomaly or running status
-
-        Replace this section later with ML model inference.
+        Replace this method later with actual ML inference.
         """
 
         signal = np.array(signal_data, dtype=np.float32)
 
         if len(signal) == 0:
-            return {
+            result = {
                 "machine_id": self.machine_name,
                 "sensor_type": self.sensor_type,
                 "sensor_name": self.sensor_name,
@@ -178,15 +179,17 @@ class RealtimeInferenceHeartbeatNode(Node):
                 "rms": 0.0,
                 "variance": 0.0,
                 "sampling_rate": sampling_rate,
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+
+            print(f"[PREDICTION] {self.machine_name} | NO DATA")
+            return result
 
         rms = np.sqrt(np.mean(signal ** 2))
         variance = np.var(signal)
 
-        # Simple combined statistical score
         current_score = rms + 0.5 * variance
 
-        # Cumulative sliding window
         self.score_buffer.append(current_score)
 
         if len(self.score_buffer) > self.score_window_size:
@@ -200,6 +203,16 @@ class RealtimeInferenceHeartbeatNode(Node):
         else:
             status = "running"
             prediction = "running_ok"
+
+        print(
+            f"[PREDICTION] {self.machine_name} | "
+            f"Score={average_score:.4f} | "
+            f"Current={current_score:.4f} | "
+            f"RMS={rms:.4f} | "
+            f"Variance={variance:.4f} | "
+            f"Threshold={self.threshold} | "
+            f"Status={status.upper()}"
+        )
 
         result = {
             "machine_id": self.machine_name,
@@ -226,10 +239,17 @@ class RealtimeInferenceHeartbeatNode(Node):
 
         self.prediction_pub.publish(msg)
 
+        print(
+            f"[PUBLISHED] /predictions | "
+            f"{prediction_result['machine_id']} | "
+            f"{prediction_result['prediction']}"
+        )
+
         logger.info(f"Published prediction: {msg.data}")
 
     def send_heartbeat(self):
         if self.latest_prediction is None:
+            print(f"[HEARTBEAT] Waiting for first prediction from {self.machine_name}")
             return
 
         payload = {
@@ -255,15 +275,24 @@ class RealtimeInferenceHeartbeatNode(Node):
         }
 
         try:
+            print(
+                f"[HEARTBEAT] Sending | "
+                f"Machine={self.machine_name} | "
+                f"Status={self.latest_prediction.get('status')} | "
+                f"Score={self.latest_prediction.get('score'):.4f}"
+            )
+
             response = requests.post(
                 API_URL,
                 json=payload,
                 timeout=4.0
             )
 
+            print(f"[HEARTBEAT SUCCESS] HTTP {response.status_code}")
             logger.info(f"Heartbeat sent: {response.status_code}")
 
         except requests.exceptions.RequestException as e:
+            print(f"[HEARTBEAT FAILED] {e}")
             logger.warning(f"Heartbeat failed: {e}")
 
 
@@ -276,9 +305,11 @@ def main(args=None):
         topics_list = asyncio.run(get_topics_list())
 
         if not topics_list:
+            print("[ERROR] No /telescopii topics found. Exiting.")
             logger.error("No /telescopii topics found. Exiting.")
             return
 
+        print(f"[STARTUP] Total topics found: {len(topics_list)}")
         logger.info("Initializing realtime inference + heartbeat nodes...")
 
         executor = MultiThreadedExecutor()
@@ -294,13 +325,17 @@ def main(args=None):
         for node in collector_nodes:
             executor.add_node(node)
 
+        print("[STARTUP] Realtime inference + heartbeat node started.")
         logger.info("All nodes started.")
+
         executor.spin()
 
     except KeyboardInterrupt:
+        print("[SHUTDOWN] Keyboard interrupt received.")
         logger.info("Keyboard interrupt received. Shutting down.")
 
     except Exception as e:
+        print(f"[ERROR] {e}")
         logger.error(f"Error: {e}")
 
     finally:
@@ -308,6 +343,7 @@ def main(args=None):
             executor.shutdown()
 
         rclpy.shutdown()
+        print("[SHUTDOWN] ROS 2 shutdown complete.")
 
 
 if __name__ == "__main__":
